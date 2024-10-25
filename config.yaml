@@ -1,0 +1,4 @@
+---
+  max_epochs: 300
+  devices: 1
+  limit_val_batches: 0.25
