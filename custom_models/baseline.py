@@ -17,7 +17,7 @@ class SameHour(nn.Module):
         
     def forward(self, 
                 x: Tensor,
-                edge_index: Adj,
+                edge_index: Adj = None,
                 edge_weight:  OptTensor = None,
                 u: OptTensor = None):
         return x[:,:self.horizon,:,:]
@@ -36,7 +36,7 @@ class LastValue(nn.Module):
         self.n_nodes = n_nodes
     def forward(self,
                 x: Tensor,
-                edge_index: Adj,
+                edge_index: Adj = None,
                 edge_weight: OptTensor = None,
                 u: OptTensor = None):
         return x[:,-self.horizon:, :, :]

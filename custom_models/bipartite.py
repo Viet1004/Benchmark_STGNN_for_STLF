@@ -21,7 +21,7 @@ class BiPartiteSTGraphModel(BaseModel):
                  output_size: int = None,
                  exog_size: int = 0,
                  n_aux_nodes: int = 10,
-                 enc_layers: int = 1,
+                 enc_layers: int = 2,
                  gnn_layers: int = 1,
                  activation: str = 'silu'):
 
@@ -30,7 +30,7 @@ class BiPartiteSTGraphModel(BaseModel):
         self.input_size = input_size
         self.output_size = output_size or input_size
         self.input_window_size = input_window_size
-
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         input_size += exog_size
 
         self.input_encoder = nn.Sequential(
@@ -43,10 +43,11 @@ class BiPartiteSTGraphModel(BaseModel):
             for _ in range(enc_layers)
         ])
 
-        self.main_to_aux_edge_index = torch.zeros((n_nodes + n_aux_nodes, n_nodes + n_aux_nodes), dtype=torch.int32)
 
-        self.aux_to_main_edge_index = torch.zeros((n_nodes + n_aux_nodes, n_nodes + n_aux_nodes), dtype=torch.int32)
 
+        self.main_to_aux_edge_index = torch.zeros((n_nodes + n_aux_nodes, n_nodes + n_aux_nodes), dtype=torch.int32).to(device)
+        self.aux_to_main_edge_index = torch.zeros((n_nodes + n_aux_nodes, n_nodes + n_aux_nodes), dtype=torch.int32).to(device)
+        
         self.main_to_aux_edge_index[-n_aux_nodes:,:n_nodes] = 1
 
         self.aux_to_main_edge_index[:n_nodes,-n_aux_nodes] = 1
@@ -59,8 +60,8 @@ class BiPartiteSTGraphModel(BaseModel):
         self.emb = NodeEmbedding(n_nodes=n_nodes + n_aux_nodes, emb_size=hidden_size)
 
         self.gcn_layers_main_to_auxillary = [
-            (GatedGraphNetwork(hidden_size, hidden_size, activation=activation),
-             GatedGraphNetwork(hidden_size, hidden_size, activation=activation))
+            (GatedGraphNetwork(hidden_size, hidden_size, activation=activation).to(device),
+             GatedGraphNetwork(hidden_size, hidden_size, activation=activation).to(device))
             for _ in range(gnn_layers)
         ]
 
@@ -71,7 +72,12 @@ class BiPartiteSTGraphModel(BaseModel):
             nn.Linear(hidden_size, horizon * self.output_size),
             Rearrange('b n (h f) -> b h n f', h=horizon, f=self.output_size))
 
-    def forward(self, x, edge_index=None, u=None):
+    def forward(self, 
+                x: Tensor, 
+                edge_index=None, 
+                edge_weight=None,
+                u=None):
+        batch, time, nodes, features =  x.shape
         
         x = maybe_cat_exog(x, u)
         x = rearrange(x[:, -self.input_window_size:], 'b s n f -> b n (s f)')
@@ -79,11 +85,8 @@ class BiPartiteSTGraphModel(BaseModel):
         x = self.input_encoder(x)
         for layer in self.encoder_layers:
             x = layer(x) + x
-
         y = self.emb().unsqueeze(0)
-        
         y = y.repeat(x.size(0), 1, 1)
-        
         y[:,:self.n_nodes] += x
         
         for layer in self.gcn_layers_main_to_auxillary:

@@ -20,7 +20,7 @@ from pathlib import Path
 import logging
 logger = logging.getLogger(name=__name__)
 Path("infos/").mkdir(parents=True, exist_ok=True)
-logging.basicConfig(filename=f'/infos/{__name__}__info.log', level=logging.INFO)
+# logging.basicConfig(filename=f'/infos/{__name__}__info.log', level=logging.INFO)
 
 class STEGNN(BaseModel):
     def __init__(self,
@@ -31,7 +31,7 @@ class STEGNN(BaseModel):
                  temporal_embedding_size: int = None,
                  node_emb_size: int = 64,
                  eps: float = 1,
-                 topk: int = 5,
+                 topk: int = 150,
                  k = 2,
                  L = 2,  # Number of layers in readout
                  beta = 0.5 # How much to retain information in propagation. The higher the more different.
@@ -143,12 +143,13 @@ class STEGNN(BaseModel):
     
     def forward(self, 
                 x: Tensor,
-                edge_index: Adj,
+                edge_index: Adj = None,
                 edge_weight:  OptTensor = None,
                 u: OptTensor = None
                 ):
         temporal_embedding = None
         if (u is not None) and u.dim() == 3:
+            # print(u.shape)
             # u = u[:,-1,:]
             timeslot_indices = u[:,-1,0]
             weekday_indices = u[:,-1,1]

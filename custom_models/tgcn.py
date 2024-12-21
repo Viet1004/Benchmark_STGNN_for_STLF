@@ -8,7 +8,7 @@ from tsl.nn.models import BaseModel
 from tsl.nn.layers.recurrent.base import GraphGRUCellBase
 from tsl.nn.blocks.encoders.recurrent.base import RNNBase
 from tsl.nn.blocks.decoders import MLPDecoder
-
+from tsl.nn.utils import maybe_cat_exog
 import logging
 logger = logging.getLogger(name=__name__)
 logging.basicConfig(filename='info.log', level=logging.INFO)
@@ -87,7 +87,7 @@ class TGCN(RNNBase):
     def __init__(self,
                  input_size:int,
                  hidden_size:int,
-                 norm:str = 'norm',
+                 norm:str = 'mean',
                  n_layers:int=2,
                  cat_states_layers: bool = False,
                  return_only_last_state: bool = False,
@@ -99,7 +99,6 @@ class TGCN(RNNBase):
         
         self.input_size = input_size
         self.hidden_dize = hidden_size
-        self.k = k
         rnn_cells = [
             TGCNCell(input_size=input_size if i == 0 else hidden_size,
                      hidden_size = hidden_size,
@@ -116,14 +115,15 @@ class TGCNModel(BaseModel):
     def __init__(self,
                  input_size: int,
                  horizon:int,
-                 n_layers:int = 4,
+                 n_layers:int = 1,
                  hidden_size:int = 32,
                  spatial_kernel:int=2,
+                 exog_size: int = 0,
                  ff_size = 256,
                  activation: str = 'relu'
                  ):
         super(TGCNModel, self).__init__()
-        self.tgcn = TGCN(input_size=input_size,
+        self.tgcn = TGCN(input_size=input_size+exog_size,
                          hidden_size=hidden_size,
                          n_layers=n_layers,
                          k=spatial_kernel,
@@ -137,7 +137,9 @@ class TGCNModel(BaseModel):
     def forward(self,
                 x: Tensor,
                 edge_index: Adj,
-                edge_weight: OptTensor = None):
+                edge_weight: OptTensor = None,
+                u = None):
+        x = maybe_cat_exog(x=x, u=u)
         out = self.tgcn(x,
                         edge_index,
                         edge_weight)

@@ -15,31 +15,60 @@ import scipy.special
 from dtw import dtw
 import scipy.spatial.distance as sd
 from tsl.data import SpatioTemporalDataset
-from tsl.metrics.torch import MaskedMAE, MaskedMAPE
+from tsl.metrics.torch import MaskedMAE, MaskedMAPE, MaskedMSE
+from tsl.metrics.torch.metric_base import MaskedMetric
+from torchmetrics import MeanSquaredLogError
 from tsl.engines import Predictor
 from tsl.data.datamodule import (SpatioTemporalDataModule,
-                                 TemporalSplitter)
-from custom_models import BiPartiteSTGraphModel, StaticGTS, STEGNN, TGCNModel, GraphConvLSTMModel, SameHour, LastValue
-from tsl.nn.utils import get_layer_activation, maybe_cat_exog
+                                 TemporalSplitter,
+                                 AtTimeStepSplitter)
+from tsl.metrics.torch.metric_base import convert_to_masked_metric
 
-from tsl.data.preprocessing import StandardScaler
+from custom_models import BiPartiteSTGraphModel, StaticGTS, STEGNN, TGCNModel, GraphConvLSTMModel, SameHour, LastValue, TGCNModel_2
+from graph_generation import AdjacencyMatrixGenerator
+from tsl.nn.utils import get_layer_activation, maybe_cat_exog
+import argparse
+from tsl.data.preprocessing import StandardScaler, MinMaxScaler
 import yaml
-from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn as nn
+from typing import Any
+from datetime import datetime
 
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
-from tsl.nn.models import BaseModel
-from tsl.nn.utils import get_layer_activation, maybe_cat_exog
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
+
+from tsl.nn.models import BaseModel
+from tsl.nn.utils import get_layer_activation, maybe_cat_exog
 from tsl.nn.models.stgn.graph_wavenet_model import GraphWaveNetModel
+from tsl.nn.models.stgn.gated_gn_model import GatedGraphNetworkModel
 from tsl.nn.models.stgn.gru_gcn_model import GRUGCNModel
 from tsl.nn.models.stgn.agcrn_model import AGCRNModel
 from tsl.nn.models.temporal.linear_models import VARModel
 from tsl.nn.models.temporal.rnn_model import RNNModel
+from tsl.nn.models.temporal.transformer_model import TransformerModel 
+import matplotlib.pyplot as plt
+from tools import plot_time_series, plot_adj_heatmap
+
+import ray
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+
+from ray.train.lightning import (
+    RayDDPStrategy,
+    RayLightningEnvironment,
+    RayTrainReportCallback,
+    prepare_trainer,
+)
+from ray.train import RunConfig, ScalingConfig, CheckpointConfig
+
+from ray.train.torch import TorchTrainer
+# Define a TorchTrainer without hyper-parameters for Tuner
 
 
 print(f"tsl version  : {tsl.__version__}")
@@ -48,6 +77,22 @@ print(f"torch version: {torch.__version__}")
 pd.options.display.float_format = '{:.2f}'.format
 np.set_printoptions(edgeitems=3, precision=3)
 torch.set_printoptions(edgeitems=2, precision=3)
+
+
+config = 'config.yaml'
+###########
+
+
+with open(config, 'r') as file:
+    config = yaml.safe_load(file)
+
+exogeneous_added = config['exogeneous']
+max_epochs = config['max_epochs']
+devices = config['devices']
+limit_val_batches = config['limit_val_batches']
+fold = config['fold']        
+batch_size = config['batch_size']
+learning_rate = config['learning_rate']
 
 # Utility functions ################
 def print_matrix(matrix):
@@ -59,11 +104,37 @@ def print_model_size(model):
     print("=" * len(out))
     print(out)
 
+class MaskedMeanSquaredLogError(MaskedMetric):
+    """Mean Absolute Error Metric.
+
+    Args:
+        mask_nans (bool, optional): Whether to automatically mask nan values.
+        mask_inf (bool, optional): Whether to automatically mask infinite
+            values.
+        at (int, optional): Whether to compute the metric only w.r.t. a certain
+         time step.
+    """
+
+    is_differentiable: bool = True
+    higher_is_better: bool = False
+    full_state_update: bool = False
+
+    def __init__(self, mask_nans=False, mask_inf=False, at=None, **kwargs: Any):
+        super(MaskedMeanSquaredLogError, self).__init__(
+            metric_fn=MeanSquaredLogError(),
+            mask_nans=mask_nans,
+            mask_inf=mask_inf,
+            metric_fn_kwargs={'reduction': 'none'},
+            at=at,
+            **kwargs,
+        )
+
+
 class SaveAdjMatrix(pl.callbacks.Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         # Check if the current epoch is a multiple of 5
         # if (trainer.current_epoch + 1) % 5 == 0:
-            print(f"Epoch {trainer.current_epoch + 1} has ended.")
+            # print(f"Epoch {trainer.current_epoch + 1} has ended.")
             # Execute custom logic
             self.save_adj_matrix(trainer, pl_module)
     
@@ -73,22 +144,24 @@ class SaveAdjMatrix(pl.callbacks.Callback):
         if hasattr(pl_module.model, 'get_learned_adj') and callable(getattr(pl_module.model, 'get_learned_adj')):
             # Execute the 'get_adj_matrix' method
             adj_matrix = pl_module.model.get_learned_adj()
-            print(adj_matrix[:5,:5])
             # print("Adjacency matrix obtained from get_learned_adj method:", adj_matrix)
         else:
-            print("The model does not have a callable 'get_learned_adj' method.")
+            pass
+            # print("The model does not have a callable 'get_learned_adj' method.")
 
 
 
 class STGraph:
-    def __init__(self, models: list, datamodules: list[SpatioTemporalDataModule], loss_fn = None, metrics = None):
-        self.models = models
-        self.datamodules = datamodules
+    def __init__(self, model: BaseModel, datamodule: SpatioTemporalDataModule, loss_fn = None, metrics = None):
+        self.model = model
+        self.datamodule = datamodule
         
         if loss_fn:
             self.loss_fn = loss_fn
         else: 
             self.loss_fn = MaskedMAE()
+            # msle = convert_to_masked_metric(MeanSquaredLogError)
+            # self.loss_fn = MaskedMeanSquaredLogError()
         if metrics:
             self.metrics =  metrics
         else: 
@@ -99,12 +172,14 @@ class STGraph:
                 'mae_at_30': MaskedMAE(at=5),
                 # 'mae_at_60': MaskedMAE(at=11)
                 }
-    def add_model(self, model):
-        self.models.append(model)
 
-    def run(self, config):
-        with open(config, 'r') as file:
-            config = yaml.safe_load(file)
+    # def tune():
+    
+    def run(self, experiment_id, method = None):
+
+        ########### Change
+        # scheduler = ASHAScheduler(max_t=10, grace_period=1, reduction_factor=2)
+
 
 
         if torch.cuda.is_available():
@@ -114,100 +189,155 @@ class STGraph:
         else:
             accelerator = 'cpu'
 
-        max_epochs = config['max_epochs']
-        devices = config['devices']
-        limit_val_batches = config['limit_val_batches']
 
-        for datamodule in self.datamodules:
-            for model in self.models:
-                logger = TensorBoardLogger(save_dir="logs", name=model.__class__.__name__, version=0)
-                
-                checkpoint_callback = ModelCheckpoint(
-                    dirpath=f'checkpoint/{model.__class__.__name__}',
-                    save_top_k=1,
-                    monitor='val_mae',
-                    mode='min',
-                )
-                            
-                save_adj = SaveAdjMatrix()
-                
-                early_stopping = EarlyStopping(monitor="val_loss", mode="min", patience=5)
+        logger = TensorBoardLogger(save_dir="logs", name=self.model.__class__.__name__, version=0)
+        
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=f'checkpoint/{self.model.__class__.__name__}',
+            save_top_k=1,
+            monitor='val_mae',
+            mode='min',
+        )
+                    
+        save_adj = SaveAdjMatrix()
+        
+        early_stopping = EarlyStopping(monitor="val_loss", mode="min", patience=5)
+            
+        trainer = pl.Trainer(
+            max_epochs=max_epochs,
+            logger=logger,
+            accelerator=accelerator,
+            devices=devices,
+            limit_val_batches=limit_val_batches,
+            check_val_every_n_epoch=5,
+            # strategy=RayDDPStrategy(),
+            # strategy='ddp',
+            callbacks = [checkpoint_callback, save_adj, early_stopping],
+            # callbacks = [checkpoint_callback, save_adj, early_stopping, RayTrainReportCallback()],
+            enable_progress_bar=False
+            # callbacks = [checkpoint_callback]
+        )
 
-                trainer = pl.Trainer(
-                    max_epochs=max_epochs,
-                    logger=logger,
-                    accelerator=accelerator,
-                    devices=devices,
-                    limit_train_batches=limit_val_batches,
-                    check_val_every_n_epoch=5,
-                    callbacks = [checkpoint_callback, save_adj, early_stopping],
-                    # callbacks = [checkpoint_callback]
-                )
-                predictor = Predictor(
-                    model=model,
-                    optim_class=torch.optim.Adam,  # specify optimizer to be used...
-                    optim_kwargs={'lr': 0.001},    # ...and parameters for its initialization
-                    loss_fn=self.loss_fn,               # which loss function to be used
-                    metrics=self.metrics                # metrics to be logged during train/val/test
-                )
-                try:
-                    trainer.fit(predictor, datamodule)
-                except ValueError as e:
-                    pass
-                predictor.freeze()
-                trainer.test(predictor, datamodule=datamodule)
+        ######## Change
+        # trainer = prepare_trainer(trainer)
+        ########
+
+        predictor = Predictor(
+            model=self.model,
+            optim_class=torch.optim.Adam,  # specify optimizer to be used...
+            optim_kwargs={'lr': learning_rate},    # ...and parameters for its initialization
+            loss_fn=self.loss_fn,               # which loss function to be used
+            metrics=self.metrics                # metrics to be logged during train/val/test
+        )
+        ########## Change
+        # def train_func():
+        ##########
+        try:
+            trainer.fit(predictor, self.datamodule)
+        except ValueError as e:
+            print(e)
+        
+        # predictor.load_model(checkpoint_callback.best_model_path)
+
+        predictor.freeze()
+        
+        def record(predictions):
+            # predictions = trainer.predict(predictor, dataloaders=self.datamodule.test_dataloader())
+            y_hat_col = []
+            y_col = []
+            for i, prediction in enumerate(predictions):
+                y_hat = rearrange(prediction['y_hat'], 'b t n f -> (b t) (n f)')
+                y = rearrange(prediction['y'], 'b t n f -> (b t) (n f)')
+                y_hat_col.append(y_hat)
+                y_col.append(y)
+            y_hat_flat = torch.cat(y_hat_col, dim=0)
+            y_flat = torch.cat(y_col, dim=0)
+            return y_hat_flat, y_flat
+
+        try:
+            trainer.test(predictor, datamodule=self.datamodule, ckpt_path='best')
+            predictions = trainer.predict(predictor, dataloaders=self.datamodule.test_dataloader(), ckpt_path='best')
+            
+        except ValueError as e:
+            print("Model has no trainable parameters")
+            trainer.test(predictor, datamodule=self.datamodule)
+            predictions = trainer.predict(predictor, dataloaders=self.datamodule.test_dataloader())
+        y_hat, y = record(predictions)
+        y_hat, y = y_hat.cpu().numpy(), y.cpu().numpy()
+        plot_time_series(y_hat[:96,0], y[:96,0], self.model.__class__.__name__)
+        if method != None:
+            os.makedirs(f'save_inference_result/{experiment_id}/{method}', exist_ok=True)
+            np.save(f'save_inference_result/{experiment_id}/{method}/y_hat_{self.model.__class__.__name__}.npy', y_hat)
+            np.save(f'save_inference_result/{experiment_id}/{method}/y.npy', y)
+        else:
+            os.makedirs(f'save_inference_result/{experiment_id}/', exist_ok=True)
+            np.save(f'save_inference_result/{experiment_id}/y_hat_{self.model.__class__.__name__}.npy', y_hat)
+            np.save(f'save_inference_result/{experiment_id}/y.npy', y)
+                    
 
 
-def load_data():
+
+
+
+def load_data(method):
     # This is for load data LCL_12month.h5
-    # df = pd.read_hdf('data/LCL_12month.h5').iloc[:,:50]
-    # df = pd.read_hdf('data/LCL_12month.h5')
+    # df = pd.read_hdf('data/LCL_12month.h5').iloc[:,:30]
+    # # df = pd.read_hdf('data/LCL_12month.h5')
 
     # df_numpy = copy.deepcopy(df)
-    # print(df_numpy[:5])
+    # # print(df_numpy[:5])
     # df.index = pd.to_datetime(df.index)
 
 
     ## This is for load data LCL_228houses.csv
     df = pd.read_csv('data/DataLCL_228houses_with_timeslot_temperature.csv')
-    df.index = pd.to_datetime(df.index)
-
-    time_index = df[['time_slot', 'weekday']].values
-    temperature = df['Temperature'].values
-    covariates = {'u': time_index}
-    df = df.loc[:, ~df.columns.isin(['ds','time_slot', 'Temperature', 'weekday'])]
     
+    # df.index = pd.to_datetime(df['ds'])
 
-
-
-    df_down_sampling = df.resample('1D').sum()
-
-    numpy_df = df_down_sampling.to_numpy().T
+    # time_index = df[['time_slot', 'weekday']].values
     
-    def dtw_distance(ts_1, ts_2):
-        return dtw(ts_1, ts_2, keep_internals=True).normalizedDistance
+    # temperature = np.expand_dims(temperature, -1)
 
-    distance_table = sd.squareform(sd.pdist(numpy_df, dtw_distance))
+    df['ds'] = pd.to_datetime(df['ds'], format='%Y-%m-%d %H:%M:%S')
+    # df = df.loc[df['ds'] < datetime(2013,12,30,23,59,59)]
+    df.set_index('ds', inplace=True)
+    temperature = pd.DataFrame(df['Temperature'])
+    df = df.loc[:, ~df.columns.isin(['time_slot', 'Temperature', 'weekday'])]
+    n_nodes = df.shape[1]
+    if exogeneous_added:
+        covariates = {'u': temperature}
+    else:
+        covariates = None    
+    # df = df.iloc[:,:20]
+    #This is for 1000 household
+    # df = pd.read_parquet('/home/users/qnguyen/Graph/data/dataframe_not_anonymized.parquet')
+    # df = df.pivot(index='ds', columns='unique_id', values='y')
+    
+    # df.index = pd.to_datetime(df['ds'])
 
-    adj = scipy.special.softmax(-distance_table, axis=1)
-    print(adj.shape)
-    # adj = np.zeros((100,100))
-    # for i in range(100):
-    #     adj[i,i] = 0
-    rows, cols = np.nonzero(adj)
-    # edge_index = np.vstack((rows, cols))
-    edge_index = torch.vstack((torch.tensor(rows, dtype=torch.int64), torch.tensor(cols, dtype=torch.int64)))
+    edge_index = edge_index = np.vstack((np.arange(n_nodes), np.arange(n_nodes)))
+    edge_weights = np.ones(n_nodes)
 
-    edge_weights = adj[rows, cols]
+    if method != None:
+
+        adj_gen = AdjacencyMatrixGenerator(df)
+
+        adj = adj_gen.calculate(method=method)
+
+        plot_adj_heatmap(adj, f'visualization/adj_heatmap/{method}.pdf')
+
+        rows, cols = np.nonzero(adj)
+        edge_index = np.vstack((rows, cols))
+        edge_weights = adj[rows, cols]
 
 
     torch_dataset = SpatioTemporalDataset(target=df,
                                             connectivity=(edge_index, edge_weights),
                                             # connectivity=(None, None),
-                                            # covariates=covariates,
-                                            horizon=24,
+                                            covariates=covariates,
+                                            horizon=48,
                                             window=48,
-                                            stride=1)
+                                            stride=48)
 
 
     scalers = {'target': StandardScaler(axis=(0, 1))}
@@ -215,13 +345,43 @@ def load_data():
     # Split data sequentially:
     #   |------------ dataset -----------|
     #   |--- train ---|- val -|-- test --|
-    splitter = TemporalSplitter(val_len=0.1, test_len=0.2)
+    # splitter = TemporalSplitter(val_len=0.1, test_len=0.2)
+
+    timestamps_config = {
+        'fold_1': {
+            'first_val': datetime(2013,7,1,0,0,0),
+            'last_val': datetime(2013,8,1,0,0,0),
+            'first_test': datetime(2013,8,1,0,0,0),
+            'last_test': datetime(2013,8,31,23,59,59)
+        },
+        'fold_2': {
+            'first_val': datetime(2013,9,1,0,0,0),
+            'last_val': datetime(2013,10,1,0,0,0),
+            'first_test': datetime(2013,10,1,0,0,0),
+            'last_test': datetime(2013,10,31,23,59,59)
+        },
+        'fold_3': {
+            'first_val': datetime(2013,11,1,0,0,0),
+            'last_val': datetime(2013,12,1,0,0,0),
+            'first_test': datetime(2013,12,1,0,0,0),
+            'last_test': datetime(2013,12,31,23,59,59)
+        }
+    }
+    
+
+    splitter =  AtTimeStepSplitter(
+        first_val_ts = timestamps_config[fold]['first_val'], 
+        first_test_ts = timestamps_config[fold]['first_test'],
+        last_val_ts = timestamps_config[fold]['last_val'],
+        last_test_ts = timestamps_config[fold]['last_test']
+    )
+
 
     dm = SpatioTemporalDataModule(
         dataset=torch_dataset,
         scalers=scalers,
         splitter=splitter,
-        batch_size=32,
+        batch_size=batch_size,
     )
     
     metadata = {"n_channels": torch_dataset.n_channels,
@@ -230,24 +390,50 @@ def load_data():
                 "window": torch_dataset.window}
 
     
-    return df_down_sampling, df, dm, metadata
+    return df, dm, metadata
+
+
 
 def main():
-    df_down_sampling, df_numpy, dm, metadata = load_data()
-
-    gw = GraphWaveNetModel(input_size=metadata['n_channels'],
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    parser = argparse.ArgumentParser(description='Model to use in an experiment.')
+    parser.add_argument('model', help='Model with default parameter in the script.')
+    parser.add_argument('experiment_id', help='Id of experiment')
+    parser.add_argument('--method', default=None, help='Model with default parameter in the script.')
+    args = parser.parse_args()
+    chosen_model = args.model
+    chosen_graph_creation_method = args.method
+    experiment_id = args.experiment_id
+    print(f'The chosen model is {chosen_model}')
+    df_numpy, dm, metadata = load_data(chosen_graph_creation_method)
+    # exogeneous_added = config['exogeneous']
+    if exogeneous_added: 
+        exog_size = 1
+    else: 
+        exog_size = 0
+    gw_model = GraphWaveNetModel(input_size=metadata['n_channels'],
                        horizon=metadata['horizon'],
                        output_size=metadata['n_channels'],
                        n_nodes=metadata['n_nodes']
                        )
     
-    bipartite = BiPartiteSTGraphModel(
+    bipartite_model = BiPartiteSTGraphModel(
         input_size = metadata['n_channels'],
         horizon=metadata['horizon'],
         output_size=metadata['n_channels'],
         n_nodes=metadata['n_nodes'],
         input_window_size=metadata['window'],
-        hidden_size = 128
+        hidden_size = 128,
+        exog_size=exog_size
+    )
+
+    gg_network_model = GatedGraphNetworkModel(
+        input_size=metadata['n_channels'],
+        input_window_size=metadata['window'],
+        horizon=metadata['horizon'],
+        n_nodes=metadata['n_nodes'],
+        hidden_size=128,
+        exog_size=exog_size
     )
 
     agcrnn_model = AGCRNModel(input_size=metadata['n_channels'],
@@ -261,56 +447,85 @@ def main():
         hidden_size=128,
         output_size=metadata['n_channels'],
         horizon=metadata['horizon'],
-        exog_size=0,
+        exog_size=exog_size,
         enc_layers=1,
         gcn_layers=1
     )
 
-    static_gts = StaticGTS(
-        input_size=metadata['n_channels'],
-        window=metadata['window'],
-        horizon=metadata['horizon'],
-        n_nodes=metadata['n_nodes'],
-        hidden_size=64,
-        nodes_features=torch.Tensor(np.array(df_down_sampling.T)).unsqueeze(1)
-    )
+    # static_gts_model = StaticGTS(
+    #     input_size=metadata['n_channels'],
+    #     window=metadata['window'],
+    #     horizon=metadata['horizon'],
+    #     n_nodes=metadata['n_nodes'],
+    #     hidden_size=64,
+    #     nodes_features=torch.tensor(np.array(df_down_sampling.T), device=device, dtype=torch.float).unsqueeze(1).detach()
+    # )
     
-    tgcnModel = TGCNModel(input_size=metadata['n_channels'],
-                     horizon=metadata['horizon']
+    tgcn_model = TGCNModel(input_size=metadata['n_channels'],
+                     horizon=metadata['horizon'],
+                     exog_size=exog_size
                      )
 
-    gclstm = GraphConvLSTMModel(input_size=metadata['n_channels'],
+    tgcn_model_2 = TGCNModel_2(input_size=metadata['n_channels'],
+                               horizon=metadata['horizon'],
+                               exog_size=exog_size)
+
+    gclstm_model = GraphConvLSTMModel(input_size=metadata['n_channels'],
                                 horizon=metadata['horizon'],
                                 )
 
-    stegnn = STEGNN(input_size=metadata['n_channels'],
+    stegnn_model = STEGNN(input_size=metadata['n_channels'],
                     window=metadata['window'],
                     horizon=metadata['horizon'],
                     n_nodes=metadata['n_nodes'],
-                    temporal_embedding_size=32)
+                    temporal_embedding_size=32
+                    )
 
-    same_hour = SameHour(input_size=metadata['n_channels'],
+    same_hour_model = SameHour(input_size=metadata['n_channels'],
                          window=metadata['window'],
                          horizon=metadata['horizon'],
                          n_nodes=metadata['n_nodes'])
     
-    last_value = LastValue(input_size=metadata['n_channels'],
+    last_value_model = LastValue(input_size=metadata['n_channels'],
                          window=metadata['window'],
                          horizon=metadata['horizon'],
                          n_nodes=metadata['n_nodes'])
 
-    var = VARModel(input_size=metadata['n_channels'],
+    var_model = VARModel(input_size=metadata['n_channels'],
                    temporal_order=4,
                    output_size=metadata['n_channels'],
                    horizon=metadata['horizon'],
                    n_nodes=metadata['n_nodes'])
     
-    rnn = RNNModel(input_size=metadata['n_channels'],
+    rnn_model = RNNModel(input_size=metadata['n_channels'],
                    output_size=metadata['n_channels'],
                    horizon=metadata['horizon'])
 
-    stgraph = STGraph(models=[grugcn_model, rnn], datamodules=[dm])
-    stgraph.run(config='config.yaml')
+    tf_model = TransformerModel(input_size=metadata['n_channels'],
+                   output_size=metadata['n_channels'],
+                   horizon=metadata['horizon'])
+
+    model_dict = {'gw_model': gw_model, 
+                  'bipartite_model': bipartite_model,   # 5m to run 
+                  'rnn_model': rnn_model,           
+                  'agcrnn_model': agcrnn_model,      # 1 hour to train
+                  'grugcn_model': grugcn_model,      # 15m to run
+                #   'static_gts_model': static_gts_model, 
+                  'tgcn_model': tgcn_model,  
+                  'tgcn_model_2': tgcn_model_2,           
+                  'gclstm_model': gclstm_model,       # 6 hours to run
+                  'stegnn_model': stegnn_model,         # 10m to run
+                  'same_hour_model': same_hour_model,     
+                  'last_value_model': last_value_model, 
+                  'var_model': var_model, 
+                  'rnn_model': rnn_model,                  # 5m to run
+                  'tf_model': tf_model,
+                  'gg_network_model': gg_network_model
+                }
+    for _model_ in model_dict:
+        if chosen_model == _model_:
+            stgraph = STGraph(model=model_dict[_model_], datamodule=dm)
+            stgraph.run(experiment_id=experiment_id, method=chosen_graph_creation_method)
 
 main()
 

@@ -19,7 +19,7 @@ from einops.layers.torch import Rearrange  # reshape data with Einstein notation
 
 import logging
 logger = logging.getLogger(name=__name__)
-logging.basicConfig(filename=f'infos/{__name__}__info.log', level=logging.INFO)
+# logging.basicConfig(filename=f'infos/{__name__}__info.log', level=logging.INFO)
 # torch.cuda.memory._record_memory_history()
 
 class StaticGTS(BaseModel, LightningModule):
@@ -50,10 +50,10 @@ class StaticGTS(BaseModel, LightningModule):
         kernel = 15
         stride = 4
         padding = 7
-        logger.info(f'Length before linear layer: {nodes_features.shape}')
+        print(f'Length before linear layer: {nodes_features.shape}')
         length_ff=(nodes_features.shape[-1] + 2*padding - (kernel - 1 ) - 1)//stride + 1
         length_ff = (length_ff + 2*padding - (kernel - 1) -1)//stride + 1
-        logger.info(f'Length before linear layer: {length_ff}')
+        # logger.info(f'Length before linear layer: {length_ff}')
         self.input_encoder = nn.Sequential(
             nn.Conv1d(input_size,out_channel_encoder,kernel, stride=stride, padding=padding),
             nn.ReLU(),
@@ -80,9 +80,9 @@ class StaticGTS(BaseModel, LightningModule):
         self.decoder = DCRNN(input_size=input_size, hidden_size=hidden_size, n_layers=decoder_layers)
         self.readout = MLPDecoder(input_size=hidden_size, hidden_size=8*hidden_size, output_size=input_size)
         self.loss_fn = loss_fn
-        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        # total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.first_time = True
-        logger.info(f"Total number of parameters: {total_params}")
+        # logger.info(f"Total number of parameters: {total_params}")
 
     def _threshold(self, batch_num):
         return self.inital_decay / (
@@ -97,19 +97,20 @@ class StaticGTS(BaseModel, LightningModule):
         # What we see now is (batch, window, n_nodes, input_size)
         # labels: input of shape (batch, horizon, n_nodes, input_size (number of feature))
         batch_size, window, n_nodes, input_size = x.shape
-        logger.info(f"Shape of input {x.shape}")
-        logger.info(f'Number of nodes is: {n_nodes}')
+        # logger.info(f"Shape of input {x.shape}")
+        # logger.info(f'Number of nodes is: {n_nodes}')
         abstract_node_features = self.input_encoder(self.nodes_features.to(x.device))
-        logger.info(f"Abstract node feature shape: {abstract_node_features.shape}")
+        # print(f"Abstract node feature shape: {abstract_node_features.shape}")
         first_tensor = abstract_node_features.unsqueeze(1).expand(-1,n_nodes,-1)
         second_tensor = abstract_node_features.unsqueeze(0).expand(n_nodes, -1,-1)
-        adj = torch.concat(first_tensor, second_tensor, dim = -1)
+        adj = torch.concat((first_tensor, second_tensor), dim = -1)
         adj = self.mlp(adj)
         # adj = abstract_node_features @ abstract_node_features.T
         adj = nn.functional.gumbel_softmax(adj, tau=1, hard=True)[:,:,0].clone().view(self.n_nodes, -1)
+        
         # torch.cuda.memory._snapshot()
-        # logger.info(f'Before gumbel: {adj.shape}')
-        torch.cuda.memory._dump_snapshot(filename='debug/dump_snapshot.pickle')
+        print(f'Before gumbel: {adj.shape}')
+        # torch.cuda.memory._dump_snapshot(filename='debug/dump_snapshot.pickle')
         rows, cols = torch.nonzero(adj, as_tuple=True)
         edge_index = torch.vstack((rows,cols))
         edge_weight = adj[rows, cols]
@@ -123,11 +124,11 @@ class StaticGTS(BaseModel, LightningModule):
         # x = self.rearange_encoder(x)
         batch_size, window, n_nodes, input_size = x.shape
         # logger.info(f"Shape of input after rearange {x.shape}")
-        logger.info(f"Shape of hidden state is: {encoder_hidden_state.shape}")
+        # logger.info(f"Shape of hidden state is: {encoder_hidden_state.shape}")
         for t in range(self.window):
             _, encoder_hidden_state = self.encoder(x, edge_index, edge_weight, h=encoder_hidden_state)
         decoder_hidden_state = encoder_hidden_state[-1]
-        logger.info(f'Decoder hidden state shape: {decoder_hidden_state.shape}')
+        # logger.info(f'Decoder hidden state shape: {decoder_hidden_state.shape}')
         decoder_input = torch.zeros(batch_size,window, n_nodes, input_size).to(x.device)
         output_list = []
         for t in range(self.horizon):
@@ -146,11 +147,11 @@ class StaticGTS(BaseModel, LightningModule):
             # logger.info(f"Shape of {}")
             self.first_time = False
         outputs = torch.concat(output_list, dim=1)
-        logger.info(f'Shape of outputs: {outputs.shape}')
+        # logger.info(f'Shape of outputs: {outputs.shape}')
         return outputs
 
     def training_step(self, batch, batch_idx):
-        logger.info(f'In batch: {batch_idx}')
+        # logger.info(f'In batch: {batch_idx}')
         inputs, labels = batch
         opt = self.optimizers()
         if self.training:

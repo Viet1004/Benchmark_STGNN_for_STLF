@@ -177,8 +177,11 @@ pyrightconfig.json
 logs/
 error/
 output/
-data/
+
 checkpoint/
 tsl/
+venv_aion/
+save_inference_result/
+visualization/
 # End of https://www.toptal.com/developers/gitignore/api/python
 
