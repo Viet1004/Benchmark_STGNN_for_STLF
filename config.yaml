@@ -1,9 +1,0 @@
----
-  max_epochs: 300
-  devices: 1
-  limit_val_batches: 1
-  exogeneous: false
-  fold: 'fold_3'
-  # batch_size: 32
-  learning_rate: 0.001 
-  
