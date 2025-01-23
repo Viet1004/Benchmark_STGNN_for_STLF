@@ -32,7 +32,7 @@ We use the following datasets for the benchmark:
 | [GRUGCN](https://arxiv.org/abs/2103.07016)     | ✅               |                 | ✅           |              |
 | [GCGRU](https://www.sciencedirect.com/science/article/pii/S0952197622003761)      | ✅               |                 |              | ✅           |
 | [T-GCN](https://www.sciencedirect.com/science/article/pii/S0142061522006470)      | ✅               |                 |              | ✅           |
-| [AGCRN](ttps://proceedings.neurips.cc/paper/2020/hash/ce1aad92b939420fc17005e5461e6f48-Abstract.html)      |                  | ✅              |              | ✅           |
+| [AGCRN](https://proceedings.neurips.cc/paper/2020/hash/ce1aad92b939420fc17005e5461e6f48-Abstract.html)      |                  | ✅              |              | ✅           |
 | [GraphWavenet](https://ieeexplore-ieee-org.proxy.bnl.lu/document/9468666?arnumber=9468666)|                  | ✅              | ✅           |              |
 |  [FC-GNN](https://arxiv.org/abs/2203.03423)   |                  | ✅              | ✅           |              |
 | [BP-GNN](https://arxiv.org/abs/2203.03423)  |                  | ✅              | ✅           |              |
