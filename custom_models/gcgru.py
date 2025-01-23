@@ -7,7 +7,6 @@ from tsl.nn.utils import get_functional_activation
 from tsl.nn.models import BaseModel
 from tsl.nn.layers.recurrent.base import GraphGRUCellBase
 from tsl.nn.blocks.encoders.recurrent.base import RNNBase
-from tsl.nn.blocks.encoders import MLP
 from tsl.nn.blocks.decoders import MLPDecoder
 from tsl.nn.utils import maybe_cat_exog
 import logging
@@ -16,7 +15,7 @@ logging.basicConfig(filename='info.log', level=logging.INFO)
 
 
 
-class TGCNConv(nn.Module):
+class GCGRUConv(nn.Module):
     def __init__(self,
                  input_size: int,
                  hidden_size: int,
@@ -27,7 +26,7 @@ class TGCNConv(nn.Module):
                  activation: str = None,
                  cached: bool = False
                  ):
-        super(TGCNConv, self).__init__()
+        super(GCGRUConv, self).__init__()
         self.layers = torch.nn.ModuleList([GraphConv(input_size=input_size if i == 0 else hidden_size,
                                         output_size=hidden_size,
                                         bias=bias,
@@ -45,53 +44,46 @@ class TGCNConv(nn.Module):
             x = layer(x, edge_index, edge_weight)
         return x
     
-class TGCNCell(GraphGRUCellBase):
+class GCGRUCell(GraphGRUCellBase):
     def __init__(self,
                  input_size:int,
-                 spatial_hidden_size:int,  # Hidden_size after GCN
-                 temporal_hidden_size:int,
+                 hidden_size:int,
                  norm='mean',
                  k=2,
                  root_weight: bool = True,
                  activation: str = None,
                  cached: bool = False):
         
-        forget_gate = MLP(spatial_hidden_size + temporal_hidden_size,
-                            temporal_hidden_size
-                            )
-        update_gate = MLP(spatial_hidden_size + temporal_hidden_size,
-                            temporal_hidden_size
-                            )
-        candidate_gate = MLP(spatial_hidden_size + temporal_hidden_size,
-                            temporal_hidden_size
-                            )
-        super(TGCNCell, self).__init__(hidden_size=temporal_hidden_size,
-                                      forget_gate=forget_gate,
-                                       update_gate=update_gate,
-                                        candidate_gate=candidate_gate )
-        self.gcn_layer = TGCNConv(input_size,
-                            spatial_hidden_size,
+        forget_gate = GCGRUConv(input_size + hidden_size,
+                            hidden_size,
                             norm=norm,
                             k=k,
                             root_weight = root_weight,
                             activation = activation,
                             cached = cached
                             )
-    def forward(self, x: Tensor, h: Tensor, *args, **kwargs) -> Tensor:
-        """
-        x: [batch, *, channels] # input_size in channels
-        h: [batch, *, channels] # temporal hidden size in channel
-        """
-        embed_gcn = self.gcn_layer(x, *args, **kwargs)
-        x_gates = torch.cat([embed_gcn, h], dim=-1)
-        r = torch.sigmoid(self.forget_gate(x_gates))
-        u = torch.sigmoid(self.update_gate(x_gates))
-        x_c = torch.cat([embed_gcn, r * h], dim=-1)
-        c = torch.tanh(self.candidate_gate(x_c))        
-        h_new = u * h + (1. - u) * c
-        return h_new
-
-class TGCN(RNNBase):
+        update_gate = GCGRUConv(input_size + hidden_size,
+                            hidden_size,
+                            norm=norm,
+                            k=k,
+                            root_weight = root_weight,
+                            activation = activation,
+                            cached = cached
+                            )
+        candidate_gate = GCGRUConv(input_size + hidden_size,
+                            hidden_size,
+                            norm=norm,
+                            k=k,
+                            root_weight = root_weight,
+                            activation = activation,
+                            cached = cached
+                            )
+        super(GCGRUCell, self).__init__(hidden_size=hidden_size,
+                                      forget_gate=forget_gate,
+                                       update_gate=update_gate,
+                                        candidate_gate=candidate_gate )
+                            
+class GCGRU(RNNBase):
     def __init__(self,
                  input_size:int,
                  hidden_size:int,
@@ -108,9 +100,8 @@ class TGCN(RNNBase):
         self.input_size = input_size
         self.hidden_dize = hidden_size
         rnn_cells = [
-            TGCNCell(input_size=input_size if i == 0 else hidden_size,
-                     temporal_hidden_size = hidden_size,
-                     spatial_hidden_size = hidden_size,
+            GCGRUCell(input_size=input_size if i == 0 else hidden_size,
+                     hidden_size = hidden_size,
                      norm=norm,
                      k=k,
                      root_weight = root_weight,
@@ -118,9 +109,9 @@ class TGCN(RNNBase):
                      cached = cached
                      )
         for i in range(n_layers)]
-        super(TGCN, self).__init__(rnn_cells, cat_states_layers, return_only_last_state)
+        super(GCGRU, self).__init__(rnn_cells, cat_states_layers, return_only_last_state)
 
-class TGCNModel_2(BaseModel):
+class GCGRUModel(BaseModel):
     def __init__(self,
                  input_size: int,
                  horizon:int,
@@ -131,8 +122,8 @@ class TGCNModel_2(BaseModel):
                  ff_size = 256,
                  activation: str = 'relu'
                  ):
-        super(TGCNModel_2, self).__init__()
-        self.tgcn = TGCN(input_size=input_size+exog_size,
+        super(GCGRUModel, self).__init__()
+        self.tgcn = GCGRU(input_size=input_size+exog_size,
                          hidden_size=hidden_size,
                          n_layers=n_layers,
                          k=spatial_kernel,

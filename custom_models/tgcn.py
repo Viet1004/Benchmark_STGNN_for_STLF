@@ -7,6 +7,7 @@ from tsl.nn.utils import get_functional_activation
 from tsl.nn.models import BaseModel
 from tsl.nn.layers.recurrent.base import GraphGRUCellBase
 from tsl.nn.blocks.encoders.recurrent.base import RNNBase
+from tsl.nn.blocks.encoders import MLP
 from tsl.nn.blocks.decoders import MLPDecoder
 from tsl.nn.utils import maybe_cat_exog
 import logging
@@ -47,42 +48,49 @@ class TGCNConv(nn.Module):
 class TGCNCell(GraphGRUCellBase):
     def __init__(self,
                  input_size:int,
-                 hidden_size:int,
+                 spatial_hidden_size:int,  # Hidden_size after GCN
+                 temporal_hidden_size:int,
                  norm='mean',
                  k=2,
                  root_weight: bool = True,
                  activation: str = None,
                  cached: bool = False):
         
-        forget_gate = TGCNConv(input_size + hidden_size,
-                            hidden_size,
-                            norm=norm,
-                            k=k,
-                            root_weight = root_weight,
-                            activation = activation,
-                            cached = cached
+        forget_gate = MLP(spatial_hidden_size + temporal_hidden_size,
+                            temporal_hidden_size
                             )
-        update_gate = TGCNConv(input_size + hidden_size,
-                            hidden_size,
-                            norm=norm,
-                            k=k,
-                            root_weight = root_weight,
-                            activation = activation,
-                            cached = cached
+        update_gate = MLP(spatial_hidden_size + temporal_hidden_size,
+                            temporal_hidden_size
                             )
-        candidate_gate = TGCNConv(input_size + hidden_size,
-                            hidden_size,
-                            norm=norm,
-                            k=k,
-                            root_weight = root_weight,
-                            activation = activation,
-                            cached = cached
+        candidate_gate = MLP(spatial_hidden_size + temporal_hidden_size,
+                            temporal_hidden_size
                             )
-        super(TGCNCell, self).__init__(hidden_size=hidden_size,
+        super(TGCNCell, self).__init__(hidden_size=temporal_hidden_size,
                                       forget_gate=forget_gate,
                                        update_gate=update_gate,
                                         candidate_gate=candidate_gate )
-                            
+        self.gcn_layer = TGCNConv(input_size,
+                            spatial_hidden_size,
+                            norm=norm,
+                            k=k,
+                            root_weight = root_weight,
+                            activation = activation,
+                            cached = cached
+                            )
+    def forward(self, x: Tensor, h: Tensor, *args, **kwargs) -> Tensor:
+        """
+        x: [batch, *, channels] # input_size in channels
+        h: [batch, *, channels] # temporal hidden size in channel
+        """
+        embed_gcn = self.gcn_layer(x, *args, **kwargs)
+        x_gates = torch.cat([embed_gcn, h], dim=-1)
+        r = torch.sigmoid(self.forget_gate(x_gates))
+        u = torch.sigmoid(self.update_gate(x_gates))
+        x_c = torch.cat([embed_gcn, r * h], dim=-1)
+        c = torch.tanh(self.candidate_gate(x_c))        
+        h_new = u * h + (1. - u) * c
+        return h_new
+
 class TGCN(RNNBase):
     def __init__(self,
                  input_size:int,
@@ -101,7 +109,8 @@ class TGCN(RNNBase):
         self.hidden_dize = hidden_size
         rnn_cells = [
             TGCNCell(input_size=input_size if i == 0 else hidden_size,
-                     hidden_size = hidden_size,
+                     temporal_hidden_size = hidden_size,
+                     spatial_hidden_size = hidden_size,
                      norm=norm,
                      k=k,
                      root_weight = root_weight,

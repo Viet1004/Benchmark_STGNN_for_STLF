@@ -24,7 +24,7 @@ from tsl.data.datamodule import (SpatioTemporalDataModule,
                                  AtTimeStepSplitter)
 from tsl.metrics.torch.metric_base import convert_to_masked_metric
 
-from custom_models import BiPartiteSTGraphModel, StaticGTS, STEGNN, TGCNModel, GraphConvLSTMModel, SameHour, LastValue, TGCNModel_2
+from custom_models import BiPartiteSTGraphModel, StaticGTS, STEGNN, GCGRUModel, GraphConvLSTMModel, SameHour, LastValue, TGCNModel_2
 from graph_generation import AdjacencyMatrixGenerator
 from tsl.nn.utils import get_layer_activation, maybe_cat_exog
 import argparse
@@ -445,7 +445,7 @@ def main():
         gcn_layers=1
     )
     
-    tgcn_model = TGCNModel(input_size=metadata['n_channels'],
+    gcgru_model = GCGRUModel(input_size=metadata['n_channels'],
                      horizon=metadata['horizon'],
                      exog_size=exog_size
                      )
@@ -494,8 +494,8 @@ def main():
                   'agcrnn_model': agcrnn_model,      # 1 hour to train
                   'grugcn_model': grugcn_model,      # 15m to run
                 #   'static_gts_model': static_gts_model, 
-                  'tgcn_model': tgcn_model,  
-                  'tgcn_model_2': tgcn_model_2,           
+                  'gcgru_model': gcgru_model,  
+                  'tgcn_model': tgcn_model_2,           
                   'stegnn_model': stegnn_model,         # 10m to run
                   'same_hour_model': same_hour_model,     
                   'last_value_model': last_value_model, 
