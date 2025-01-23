@@ -183,5 +183,24 @@ tsl/
 venv_aion/
 save_inference_result/
 visualization/
+
+run.sh
+run-gpu.sh
+
+Spatiotemporal_Graph_Neural_Networks_with_tsl.ipynb
+metrics_joaquin.csv
+
+
+start_aion_cpu_jupyterlab.sh
+start_iris_cpu_jupyterlab.sh
+start_iris_gpu_jupyterlab.sh
+
+MAC000026.pdf
+
+info.log
+
+connection_instructions.log
+
+
 # End of https://www.toptal.com/developers/gitignore/api/python
 

@@ -55,21 +55,23 @@ from tsl.nn.models.temporal.transformer_model import TransformerModel
 import matplotlib.pyplot as plt
 from tools import plot_time_series, plot_adj_heatmap
 
-import ray
-from ray import tune
-from ray.tune.schedulers import ASHAScheduler
-
-from ray.train.lightning import (
-    RayDDPStrategy,
-    RayLightningEnvironment,
-    RayTrainReportCallback,
-    prepare_trainer,
-)
-from ray.train import RunConfig, ScalingConfig, CheckpointConfig
-
-from ray.train.torch import TorchTrainer
 # Define a TorchTrainer without hyper-parameters for Tuner
 
+parser = argparse.ArgumentParser(description='Model to use in an experiment.')
+parser.add_argument('model', help='Model')
+parser.add_argument('experiment_id', help='Id of experiment')
+parser.add_argument('--method', default=None, help='Model with default parameter in the script.')
+parser.add_argument('--window', default=48, type=int,  help='Window as input for model.')
+parser.add_argument('--hidden_dimension', default=64, type=int, help='hidden dimension fore neural network model.')
+parser.add_argument('--learning_rate', default=0.001, type=float, help='Learning rate for training.')
+parser.add_argument('--batch_size', default=32, type=int, help='Batch size of data')
+args = parser.parse_args()
+
+
+W_window = args.window
+hidden_dimension = args.hidden_dimension
+learning_rate = args.learning_rate
+batch_size = args.batch_size
 
 print(f"tsl version  : {tsl.__version__}")
 print(f"torch version: {torch.__version__}")
@@ -91,8 +93,9 @@ max_epochs = config['max_epochs']
 devices = config['devices']
 limit_val_batches = config['limit_val_batches']
 fold = config['fold']        
-batch_size = config['batch_size']
-learning_rate = config['learning_rate']
+# batch_size = config['batch_size']
+
+
 
 # Utility functions ################
 def print_matrix(matrix):
@@ -238,6 +241,9 @@ class STGraph:
             print(e)
         
         # predictor.load_model(checkpoint_callback.best_model_path)
+        validation_result = trainer.validate(predictor, self.datamodule, ckpt_path='best')
+        # print(validation_result)
+        validation_mae = validation_result[0]["val_mae"]
 
         predictor.freeze()
         
@@ -274,22 +280,13 @@ class STGraph:
             np.save(f'save_inference_result/{experiment_id}/y_hat_{self.model.__class__.__name__}.npy', y_hat)
             np.save(f'save_inference_result/{experiment_id}/y.npy', y)
                     
-
+        return validation_mae
 
 
 
 
 def load_data(method):
-    # This is for load data LCL_12month.h5
-    # df = pd.read_hdf('data/LCL_12month.h5').iloc[:,:30]
-    # # df = pd.read_hdf('data/LCL_12month.h5')
 
-    # df_numpy = copy.deepcopy(df)
-    # # print(df_numpy[:5])
-    # df.index = pd.to_datetime(df.index)
-
-
-    ## This is for load data LCL_228houses.csv
     df = pd.read_csv('data/DataLCL_228houses_with_timeslot_temperature.csv')
     
     # df.index = pd.to_datetime(df['ds'])
@@ -336,7 +333,7 @@ def load_data(method):
                                             # connectivity=(None, None),
                                             covariates=covariates,
                                             horizon=48,
-                                            window=48,
+                                            window=W_window,
                                             stride=48)
 
 
@@ -396,11 +393,7 @@ def load_data(method):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    parser = argparse.ArgumentParser(description='Model to use in an experiment.')
-    parser.add_argument('model', help='Model with default parameter in the script.')
-    parser.add_argument('experiment_id', help='Id of experiment')
-    parser.add_argument('--method', default=None, help='Model with default parameter in the script.')
-    args = parser.parse_args()
+
     chosen_model = args.model
     chosen_graph_creation_method = args.method
     experiment_id = args.experiment_id
@@ -423,7 +416,7 @@ def main():
         output_size=metadata['n_channels'],
         n_nodes=metadata['n_nodes'],
         input_window_size=metadata['window'],
-        hidden_size = 128,
+        hidden_size = hidden_dimension,
         exog_size=exog_size
     )
 
@@ -432,7 +425,7 @@ def main():
         input_window_size=metadata['window'],
         horizon=metadata['horizon'],
         n_nodes=metadata['n_nodes'],
-        hidden_size=128,
+        hidden_size=hidden_dimension,
         exog_size=exog_size
     )
 
@@ -444,22 +437,13 @@ def main():
     
     grugcn_model = GRUGCNModel(
         input_size=metadata['n_channels'],
-        hidden_size=128,
+        hidden_size=hidden_dimension,
         output_size=metadata['n_channels'],
         horizon=metadata['horizon'],
         exog_size=exog_size,
         enc_layers=1,
         gcn_layers=1
     )
-
-    # static_gts_model = StaticGTS(
-    #     input_size=metadata['n_channels'],
-    #     window=metadata['window'],
-    #     horizon=metadata['horizon'],
-    #     n_nodes=metadata['n_nodes'],
-    #     hidden_size=64,
-    #     nodes_features=torch.tensor(np.array(df_down_sampling.T), device=device, dtype=torch.float).unsqueeze(1).detach()
-    # )
     
     tgcn_model = TGCNModel(input_size=metadata['n_channels'],
                      horizon=metadata['horizon'],
@@ -470,9 +454,6 @@ def main():
                                horizon=metadata['horizon'],
                                exog_size=exog_size)
 
-    gclstm_model = GraphConvLSTMModel(input_size=metadata['n_channels'],
-                                horizon=metadata['horizon'],
-                                )
 
     stegnn_model = STEGNN(input_size=metadata['n_channels'],
                     window=metadata['window'],
@@ -499,7 +480,9 @@ def main():
     
     rnn_model = RNNModel(input_size=metadata['n_channels'],
                    output_size=metadata['n_channels'],
-                   horizon=metadata['horizon'])
+                   horizon=metadata['horizon'],
+                   hidden_size=hidden_dimension,
+                   rec_layers=3)
 
     tf_model = TransformerModel(input_size=metadata['n_channels'],
                    output_size=metadata['n_channels'],
@@ -513,7 +496,6 @@ def main():
                 #   'static_gts_model': static_gts_model, 
                   'tgcn_model': tgcn_model,  
                   'tgcn_model_2': tgcn_model_2,           
-                  'gclstm_model': gclstm_model,       # 6 hours to run
                   'stegnn_model': stegnn_model,         # 10m to run
                   'same_hour_model': same_hour_model,     
                   'last_value_model': last_value_model, 
@@ -522,10 +504,12 @@ def main():
                   'tf_model': tf_model,
                   'gg_network_model': gg_network_model
                 }
-    for _model_ in model_dict:
-        if chosen_model == _model_:
-            stgraph = STGraph(model=model_dict[_model_], datamodule=dm)
-            stgraph.run(experiment_id=experiment_id, method=chosen_graph_creation_method)
+    _model_ = model_dict[chosen_model]
+
+    stgraph = STGraph(model=_model_, datamodule=dm)
+    validation_mae = stgraph.run(experiment_id=experiment_id, method=chosen_graph_creation_method)
+    print(f"MAE at validation dataset is: {validation_mae}")
+
 
 main()
 

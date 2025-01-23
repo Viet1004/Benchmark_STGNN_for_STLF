@@ -8,20 +8,21 @@
 #SBATCH --ntasks-per-node 1 
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=10:00:00     # Set job duration to 10 hours
+#SBATCH --time=10:00:00     # Set job duration to 15 hours
 
 
 # Activate a virtual environment if needed
 source ~/environments/tsl/bin/activate
 
 
-# models_1=("same_hour_model" "tf_model" "var_model" "rnn_model" "stegnn_model" "bipartite_model" "agcrnn_model" "gg_network_model" "gw_model" )
+models_1=("last_value_model" "tf_model" "var_model" "rnn_model" "bipartite_model" "agcrnn_model" "gg_network_model" "gw_model" )
 # models=("gg_network_model")
-models_1=()
+# models_1=()
 methods=("correntropy" "pearson" "dtw" "euclidean")
-models_2=("tgcn_model_2" "tgcn_model" "gclstm_model" "grugcn_model")
-# experiment_ids=("exp_03_03" "exp_03_04" "exp_03_05")
-experiment_ids=("exp_03_05")
+# methods=("correntropy" "pearson" "dtw")
+models_2=("tgcn_model_2" "tgcn_model" "grugcn_model")
+experiment_ids=("exp_06_04" "exp_06_05")
+# experiment_ids=("exp_03_02")
 #### Note on naming convention of exp ####
 # exp_05 experiment with fold one with 
 # exp_06 experiment with fold two

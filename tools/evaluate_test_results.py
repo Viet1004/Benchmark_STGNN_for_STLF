@@ -1,11 +1,10 @@
-from glob import glob
 import os
 import pandas as pd
 import numpy as np
 import argparse
 import re
+from glob import glob
 from pathlib import Path
-
 
 def report_household_level(y, y_hat):
     mae = np.mean(np.abs(y - y_hat))
@@ -22,8 +21,6 @@ def report_aggregate_level(y, y_hat):
     return mae, mape, rmse
 
 def process_folder(folder_path, df, df_agg):
-    # os.chdir(folder_path)
-   
     files = glob(os.path.join(folder_path, "*.npy"))
     y = None
     for file in files:
@@ -50,21 +47,17 @@ def process_folder(folder_path, df, df_agg):
                     continue
 
                 # Add metrics to DataFrame
-                if model not in df.columns:
-                    df[model] = None
                 df.loc['MAE', model] = mae
                 df.loc['MAPE', model] = mape
                 df.loc['RMSE', model] = rmse
 
-                if model not in df_agg.columns:
-                    df_agg[model] = None
                 df_agg.loc['MAE', model] = mae_agg
                 df_agg.loc['MAPE', model] = mape_agg
                 df_agg.loc['RMSE', model] = rmse_agg
 
     # Save the updated DataFrame back to the CSV file
-    df.to_csv(os.path.join(folder_path, 'metrics.csv'), index=False)
-    df_agg.to_csv(os.path.join(folder_path, 'agg_metrics.csv'), index=False)
+    df.to_csv(os.path.join(folder_path, 'metrics.csv'))
+    df_agg.to_csv(os.path.join(folder_path, 'agg_metrics.csv'))
     print(f"Metrics saved in {folder_path}")
 
 if __name__ == "__main__":
@@ -73,28 +66,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     root_folder = args.folder
-    
-    df = pd.read_csv(os.path.join(root_folder, 'metrics.csv'), index_col=0) if Path(os.path.join(root_folder, 'metrics.csv')).exists() else pd.DataFrame()
-    df_agg = pd.read_csv(os.path.join(root_folder, 'agg_metrics.csv'), index_col=0) if Path(os.path.join(root_folder, 'agg_metrics.csv')).exists() else pd.DataFrame()
+
+    # Initialize metrics DataFrames
+    df = pd.DataFrame()
+    df_agg = pd.DataFrame()
 
     # Process root folder
     print(f"Processing root folder: {root_folder}")
-    try:
-        process_folder(root_folder, df, df_agg)
-    except:
-        print("Hello!")
+    process_folder(root_folder, df, df_agg)
+
     # Recursively process all subfolders
     for dirpath, dirnames, filenames in os.walk(root_folder):
-        print(dirpath)
         for dirname in dirnames:
-            print(dirname)
             nested_folder = os.path.join(dirpath, dirname)
             print(f"Processing nested folder: {nested_folder}")
 
-            # Reload metrics DataFrames for nested folder
-            df_nested = pd.read_csv(os.path.join(nested_folder, 'metrics.csv'), index_col=0) if Path(os.path.join(nested_folder, 'metrics.csv')).exists() else pd.DataFrame()
-            df_agg_nested = pd.read_csv(os.path.join(nested_folder, 'agg_metrics.csv'), index_col=0) if Path(os.path.join(nested_folder, 'agg_metrics.csv')).exists() else pd.DataFrame()
-            
+            # Reload or initialize metrics DataFrames for the nested folder
+            df_nested = pd.DataFrame()
+            df_agg_nested = pd.DataFrame()
+
             process_folder(nested_folder, df_nested, df_agg_nested)
 
     print(f"All folders and subfolders processed successfully.")
